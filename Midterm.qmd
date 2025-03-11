@@ -1,0 +1,1516 @@
+---
+title: "Midterm project: Street flood in NYC"
+author: "John Ackerman"
+toc: true
+number-sections: true
+highlight-style: pygments
+format: 
+  html: 
+    code-fold: true
+    html-math-method: katex
+    embed-resources: true
+    self-contained-math: true	
+  pdf: 
+    geometry: 
+      - top=30mm
+      - left=20mm
+##  docx: Never, unless to accommodate a collaborator
+---
+# Data Cleaning
+
+### Import the data, rename the columns with our preferred styles.
+
+To maintain proper style we will alter all column names so they are completely lowercase and all spaces will be replaced with an underscore.
+
+```{python}
+import pandas as pd
+
+# Importing NYC flood data
+df = pd.read_csv('nycflood2024.csv')
+```
+
+```{python}
+print(f'There are {len(df.columns)} in this dataset:')
+df.columns
+```
+
+```{python}
+# Renaming columns
+df.columns = df.columns.str.lower().str.replace(' ', '_')
+
+print(df.columns)
+```
+
+Now, our naming scheme is much more uniform and efficient and will make working with this dataframe easier moving forward.
+
+### Summarize the missing information. Are there variables that are close to completely missing?
+
+```{python}
+# Creating a dataframe that shows missing portion for each variable
+df_na = df.isna().mean()
+print(df_na)
+```
+
+Already we can see that variables such as location_type, landmark, and facility_type are completely empty. 
+However, since there are so many variables in this dataset, let's visualize the proportions of missing data using a histogram:
+
+```{python}
+import matplotlib.pyplot as plt
+
+plt.hist(df_na)
+plt.show()
+```
+
+With this histogram its much easier to digest what's happening in the data.
+Clearly variables are either almost entirely empty or almsot entirely non-empty.
+let's use the following code to identify variables that are close to completely missing (over 80% empty)
+
+```{python}
+# Indentifying columns 
+df_na[df_na > 0.80]
+```
+
+Shockingly, Out of the 41 original variables, 11 are completely empty.
+Therefore it's self evident that we can eliminate these variables from our dataset at no cost.
+
+```{python}
+# Removing columns with all missing values
+df = df.dropna(axis=1, how='all')
+
+print(len(df.columns))
+```
+
+As for variables such as intersection_street_1 that are only 76.3 % empty, I don't think it makes sense to remove them from our data.
+They still encode relevent information, and we may end up using them in another form during a regression analysis down the road. 
+
+### Are there redundant information in the data? Try storing the data using the Arrow format and comment on the efficiency gain.
+
+First let's check for redundent information in the current data. 
+For this analysis were going to be looking for 3 common types of redundancies in data sets:
+
+- Duplicate Rows
+- Highly Correlated Columns
+- Columns With 1 Unique Value 
+
+With that being said, let's begin by looking for duplicate rows in the dataset:
+```{python}
+# 1. Check for duplicate rows
+duplicates = df.duplicated().sum()
+print(f"Number of duplicate rows: {duplicates}")
+```
+
+There doesn't appear to be any duplicate rows in the data. 
+Next, let's search for highly correlated columns:
+```{python}
+import numpy as np
+
+# 2. Check for highly correlated numeric columns
+numeric_cols = df.select_dtypes(include=[np.number]).columns
+if len(numeric_cols) >= 2: # Good safety measure
+    corr_matrix = df[numeric_cols].corr().abs()
+    mask = np.triu(np.ones_like(corr_matrix), k=1).astype(bool)
+    high_corr = corr_matrix.where(mask & (corr_matrix > 0.95)).stack().reset_index()
+    if not high_corr.empty:
+        high_corr.columns = ['Column 1', 'Column 2', 'Correlation']
+        print("\nHighly correlated columns (>0.95):")
+        print(high_corr)
+    else:
+        print("\nNo highly correlated numeric columns found.")
+```
+
+By no suprise, there's near perfect correlation between the x_coordinate_(state_plane) and longitude, and the y_coordinate_(state_plane) and latitude.
+However, no other pairs of columns were flagged. 
+Finally, let's check if there are any columns with 1 unique value:
+```{python}
+# Check for columns with only one unique value
+single_value_cols = []
+for col in df.columns:
+    if df[col].nunique() == 1:
+        single_value_cols.append((col, df[col].iloc[0]))
+
+
+if single_value_cols:
+    print("\nColumns w/ 1 unique value:")
+    for col, value in single_value_cols:
+        print(f"- {col}: '{value}' (all {len(df)} rows)")
+else:
+    print("\nNo columns found.")
+```
+
+Given the magnitude of the dataset, I'm surprised there we so many columns with uniform entries.
+Since these columns provide no new insight, and don't affect analysis or predictions, we'll remove them from the data set:
+```{python}
+df = df.drop(['agency', 'agency_name', 'complaint_type', 'park_facility_name'], axis=1)
+```
+
+Moving on, let's compare the efficiencies of the CSV and Arrow format.
+Currently the data is formatted as a csv file.
+However, the Arrow format has some advantages over csv.
+
+Let's begin by using PyArrow to convert our data set df into the Arrow format (.feather or .parquet).
+```{python}
+# Convert to Arrow format
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+arrow_table = pa.Table.from_pandas(df)
+
+
+# Save as Parquet (Arrow-based format)
+pq.write_table(arrow_table, "nycflood2024.parquet")
+```
+
+With that out of the way, let's investigate the difference in effieciency between the two file types.
+```{python}
+import os
+import time
+
+# Comparing file sizes
+csv_size = os.path.getsize("nycflood2024.csv")
+parquet_size = os.path.getsize("nycflood2024.parquet")
+
+size_reduction = (csv_size - parquet_size) / csv_size * 100
+print(f"\nFile size comparison:")
+print(f"CSV: {csv_size/1024/1024:.2f} MB")
+print(f"Parquet: {parquet_size/1024/1024:.2f} MB")
+print(f"Size reduction: {size_reduction:.1f}%")
+
+
+# Comparing speed of reading in data
+start = time.time()
+_ = pd.read_csv("nycflood2024.csv")
+csv_time = time.time() - start
+
+start = time.time()
+_ = pd.read_parquet("nycflood2024.parquet")
+parquet_time = time.time() - start
+
+time_reduction = (csv_time - parquet_time) / csv_time * 100
+print(f"\nRead speed comparison:")
+print(f"CSV read time: {csv_time:.3f} seconds")
+print(f"Parquet read time: {parquet_time:.3f} seconds")
+print(f"Speed improvement: {time_reduction:.1f}%")
+```
+
+Though it fluctuates between trials, the Arrow file is roughly 80% smaller than the CSV file and typically takes 20% of the time to read in. Clearly there are some substantial efficiency gains offered by the Arrow format for this data set.
+
+### Are there invalid NYC zipcode or borough? Can some of the missing values be filled? Fill them if yes.
+
+```{python}
+df.columns
+```
+
+Obviously, to answer this question we're first going to need to establish a list of valid zip code and a list of valid boroughs. Note that the list of proper NYC zip codes we're moving forward with was taken from the class GitHub.
+```{python}
+# Defining all valid NYC zip codes
+all_valid_zips = {
+    10463, 10471, 10466, 10469, 10470, 10475, 10458, 10467, 10468,
+    10461, 10462, 10464, 10465, 10472, 10473, 10453, 10457, 10460,
+    10451, 10452, 10456, 10454, 10455, 10459, 10474, 11211, 11222,
+    11201, 11205, 11215, 11217, 11231, 11213, 11212, 11216, 11233,
+    11238, 11207, 11208, 11220, 11232, 11204, 11218, 11219, 11230,
+    11203, 11210, 11225, 11226, 11234, 11236, 11239, 11209, 11214,
+    11228, 11223, 11224, 11229, 11235, 11206, 11221, 11237, 10031,
+    10032, 10033, 10034, 10040, 10026, 10027, 10030, 10037, 10039,
+    10029, 10035, 10023, 10024, 10025, 10021, 10028, 10044, 10128,
+    10001, 10011, 10018, 10019, 10020, 10036, 10010, 10016, 10017,
+    10022, 10012, 10013, 10014, 10002, 10003, 10009, 10004, 10005,
+    10006, 10007, 10038, 10280, 11101, 11102, 11103, 11104, 11105,
+    11106, 11368, 11369, 11370, 11372, 11373, 11377, 11378, 11354,
+    11355, 11356, 11357, 11358, 11359, 11360, 11361, 11362, 11363,
+    11364, 11374, 11375, 11379, 11385, 11365, 11366, 11367, 11414,
+    11415, 11416, 11417, 11418, 11419, 11420, 11421, 11412, 11423,
+    11432, 11433, 11434, 11435, 11436, 11004, 11005, 11411, 11413,
+    11422, 11426, 11427, 11428, 11429, 11691, 11692, 11693, 11694,
+    11695, 11697, 10302, 10303, 10310, 10301, 10304, 10305, 10314,
+    10306, 10307, 10308, 10309, 10312
+}
+
+# Defining all valid NYC boroughs
+valid_boroughs = {'QUEENS', 'BROOKLYN', 'STATEN ISLAND', 'MANHATTAN', 'BRONX'}
+```
+
+```{python}
+# Define valid values for each column
+valid_values = {
+    "incident_zip": all_valid_zips,
+    "borough": valid_boroughs
+}
+
+
+# Compute missing, valid, and invalid counts in one step
+summary = pd.DataFrame({
+    col: [
+        df[col].isna().sum(),  # Missing values
+        df[col].isin(valid_values[col]).sum(),  # Valid values
+        df[col].notna().sum() - df[col].isin(valid_values[col]).sum()  # Invalid values
+    ]
+    for col in valid_values
+}, index=["missing", "valid", "invalid"]).T  # Transpose for readability
+
+
+print(summary)
+```
+
+Clearly we recognize the vast majority of zip code and borough data as valid, which is great.
+Moreover, It may be possible to determine the 4 missing zip codes using coordinate data.
+Curiously, there are a few invalid borough entries, and a decent number of invalid zip code entries.
+We should further investigate what's happening here, since it could be an easy fix like a spelling mistake, or reveal an issue in our lists of valid entries.
+
+```{python}
+# For each column in valid_values
+for col in valid_values:
+    # Get all non-null values that are not in the valid_values list
+    invalid_mask = (~df[col].isna()) & (~df[col].isin(valid_values[col]))
+    invalid_values = df.loc[invalid_mask, col]
+    
+    # Count frequency of each invalid value
+    value_counts = invalid_values.value_counts()
+    
+    print(f"\n===== Invalid values for {col} =====")
+    print(value_counts)
+```
+
+Let's start by reflecting on the borough output since it's more straightforward.
+Unfortunately, both invalid entries reveal nothing about the true borough.
+The only chance save these rows at this point would be to rely on other types of location data.
+Moving onto the "invalid" zip code entries, all flagged response appear to be legimate zip codes.
+After cross references a few sources online I've found that most of these 'invalid' zip codes are actually legitimate.
+The one exception is 11040, which is the zip code for New Hyde Park, New York.
+
+```{python}
+df = df[df['incident_zip'] != 11040.0]
+```
+
+With that out of the way, let's move onto the second part of this section.
+Consider that if we have the coordinates and either zipcode and borough are empty we can fill all missing information.
+If we only have the zipcode, we can only work out the borough.
+Finally, if we only have the borough we can't work out anything more.
+That being said, let's investigate how many times in our dataset each of these scenarios happens, as well as "all non-empty" and "all empty" for reference:
+
+```{python}
+df.columns
+```
+
+```{python}
+# Define each condition
+all_non_empty = df[["location", "incident_zip", "borough"]].notna().all(axis=1).sum()
+a_only = (df["location"].notna() & df["incident_zip"].isna() | df["borough"].isna()).sum()
+b_only = (df["incident_zip"].notna() & df["location"].isna() & df["borough"].isna()).sum()
+c_only = (df["borough"].notna() & df["location"].isna() & df["incident_zip"].isna()).sum()
+all_empty = df[["location", "incident_zip", "borough"]].isna().all(axis=1).sum()
+
+
+# Store in a DataFrame for clarity
+summary = pd.DataFrame({
+    "Condition": ["All non-empty", "Location non-empty, Zip and/or borough missing", "Location and borough empty, zip non-empty", "borough only non-empty", "All empty"],
+    "Count": [all_non_empty, a_only, b_only, c_only, all_empty]
+})
+
+print(summary)
+```
+
+Out of the 9393 entries, all of location, incident_zip, and borough are non-empty 9389 times.
+The remaining 4 rows only contain borough, meaning we cannot determine location nor incident_zip.
+
+### Are there date errors? Examples are earlier closed_date than created_date; closed_date and created_date matching to the second; dates exactly at midnight or noon to the second.
+
+It's very important to diagnose issues of this sort at this stage, especially because created_date and closed_date are the building blocks for the response_time and over3d variables we'll be creating later on.
+Let's investigate how many occurances there are of each of these issues there are in the dataset.
+To accomplish this, we're going to first convert the closed_date and created_date to the datetime format to access pandas' .dt.hour and .dt.minute attributes.
+
+```{python}
+df.columns
+```
+
+```{python}
+# Convert to datetime format
+df["created_date"] = pd.to_datetime(df["created_date"])
+df["closed_date"] = pd.to_datetime(df["closed_date"])
+```
+
+Now we can easily find the number of entries in violation of each of the aforemention date errors:
+```{python}
+# Define each condition
+start_after_stop = df["created_date"] > df["closed_date"]
+exact_match = df["created_date"] == df["closed_date"]
+
+
+# Noon or midnight check (hour=0, minute=0 OR hour=12, minute=0)
+noon_or_midnight = (df["created_date"].dt.hour.isin([0, 12]) & (df["created_date"].dt.minute == 0)) | (df["closed_date"].dt.hour.isin([0, 12]) & (df["closed_date"].dt.minute == 0))
+
+
+# Store in a DataFrame for clarity
+summary = pd.DataFrame({
+    "Condition": ["Start later than stop", "Start and stop match exactly", "One or both at noon/midnight"],
+    "Count": [start_after_stop.sum(), exact_match.sum(), noon_or_midnight.sum()]
+})
+
+print(summary)
+```
+
+While only one entry had the closed date preceeding the created date, hundred of entries contained each of the remaining two errors.
+It's tempting to say that there are a total of 1 + 160 + 202 = 363 rows that contain one of these violations, however, this doesn't consider the possibility that a single row contains multiple kinds of violations.
+Hence, we'll need to do more work to figure out the true value:
+
+```{python}
+# Consolidating previously defined conditions
+condition = start_after_stop | exact_match | noon_or_midnight
+
+# Finding how many rows violate contain a violation
+date_errors = condition.sum()
+
+# Output results
+print(f"Rows fitting at least one category: {date_errors}")
+```
+
+Evidently, there are a total of 363 rows, meaning there is no overlap between conditions and our naive hypothesis was correct.
+Because of the importance of date variables, combined with the size of our dataset, and the lack of rationale for why these rows in particular might be more than random, it seems fair to handle this faulty data by completely eliminating them before analysis:
+
+```{python}
+# Remove rows that fit at least one condition
+df = df[~condition]
+```
+
+### Summarize your suggestions to the data curator in several bullet points.
+
+I have a few suggestions:
+
+- Some variables took the same value over all 1000+ rows
+   - I would recommend removing them
+   - especially those that were all empty
+- Adopt a uniform capitalization style
+- There are some redundent columns
+   - Ex: borough and borough_park
+
+However, overall the data set is very well managed, especially compared to some of the previous open source data sets we've used in the past.
+
+# Exploratory analysis.
+
+### Visualize the locations of complaints on a NYC map, with different symbols for different descriptors.
+
+For this section I'll be leveraging the 2020 Neighborhood Tabulation Areas (NTAs) data set on the NYC OpenData website (https://data.cityofnewyork.us/City-Government/2020-Neighborhood-Tabulation-Areas-NTAs-/9nt8-h7nd/data_preview). The dataset contains a column named the_geom that encodes the boundaries of all NYC neighborhoods as a MULTIPOLYGON. Hence, we'll be using this in conjunction with our flood data set to create the plot. Let's begin by reading in the boundry data.
+
+```{python}
+import geopandas as gpd
+
+# importing borough boundaries
+nta_gdf = gpd.read_file('2020_Neighborhood_Tabulation_Areas__NTAs__20250308.csv')
+```
+
+Currently our geometry column is a string representation of a MULTIPOLYGON, rather than an actual shapely geometry object. To convert them into proper geometries, we'll need to parse them into shapely geometries before converting the DataFrame into a GeoDataFrame.
+Note that for this section we'll be using the coordinate reference system (CRS) 2263: NAD83 / New York Long Island (ftUS).
+```{python}
+from shapely import wkt
+
+# Converting the WKT strings to shapely geometries
+nta_gdf['the_geom'] = nta_gdf['the_geom'].apply(wkt.loads)
+
+# Convert to geodataframe
+nta_gdf = gpd.GeoDataFrame(nta_gdf, geometry='the_geom', crs="EPSG:4326")
+
+print(nta_gdf.geometry.head())
+
+# Transforming data to CRS (2263)
+nta_gdf = nta_gdf.to_crs(2263)
+
+nta_gdf.head()
+```
+
+```{python}
+# generate geometry from x, y points
+
+crs = 2263
+geometry = gpd.points_from_xy(
+    df['x_coordinate_(state_plane)'],
+    df['y_coordinate_(state_plane)']
+)
+
+gdf = gpd.GeoDataFrame(
+    df,
+    geometry=geometry,
+    crs=crs
+)
+```
+
+```{python}
+# confirm crs
+gdf.crs
+```
+
+```{python}
+# sanity check map
+gdf.plot()
+```
+
+
+```{python}
+import matplotlib.pyplot as plt
+
+
+# Create figure and axes
+fig, ax = plt.subplots(figsize=(8, 8))
+
+
+# Plot main geodataframe
+gdf.plot(ax=ax, cmap=plt.cm.Blues)
+
+
+# Plot boundaries
+nta_gdf.plot(
+    facecolor="none",
+    edgecolor="black",
+    linewidth=.8,
+    ax=ax
+)
+
+
+# Set title and turn off axis
+label = "Count of NYC 311 Street Flooding Complaints from 2010 to 2020"
+ax.set_title(label, fontsize=13)
+ax.axis('off')
+
+
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+import matplotlib.pyplot as plt
+
+# plot params
+FIGURE_SIZE = (12, 12)
+POINT_SIZE = 30
+POINT_ALPHA = 0.6
+TITLE_FONTSIZE = 15
+LEGEND_FONTSIZE = 12
+BORDER_LINEWIDTH_BOROUGH = 0.6
+BORDER_LINEWIDTH_NTA = 0.5
+OUTPUT_DPI = 300
+
+COLOR_SCHEME = {
+    # Replace these values with your actual descriptor values
+    'Street Flooding (SJ)': '#ff7f0e',      # Blue
+    'Catch Basin Clogged/Flooding (Use Comments) (SC)': '#aec7e8'   # Amber/Yellow
+}
+
+LEGEND_LABELS = {
+    'Flooding': 'Street Flooding',
+    'Sewer backup': 'Sewer Backup'
+}
+
+
+MAP_TITLE = "NYC 311 Street Flooding Complaints (2010-2020)"
+fig, ax = plt.subplots(figsize=FIGURE_SIZE)
+
+
+# find unique descriptors
+descriptors = gdf['descriptor'].unique()
+
+# give every descriptor different color
+for descriptor in descriptors:
+    # Filter data for descriptor
+    subset = gdf[gdf['descriptor'] == descriptor]
+    
+    # Get color
+    color = COLOR_SCHEME.get(descriptor, '#999999')
+    
+    # Get legend label
+    label = LEGEND_LABELS.get(descriptor, descriptor)
+    
+    # Plotting points
+    subset.plot(
+        ax=ax,
+        color=color,
+        markersize=POINT_SIZE,
+        alpha=POINT_ALPHA,
+        label=label
+    )
+
+
+# Plotting boundaries
+nta_gdf.plot(
+    facecolor="none",
+    edgecolor="black",
+    linewidth=BORDER_LINEWIDTH_NTA,
+    ax=ax
+)
+
+# Adding display details
+ax.legend(loc='upper right', fontsize=LEGEND_FONTSIZE)
+ax.set_title(MAP_TITLE, fontsize=TITLE_FONTSIZE)
+ax.axis('off')
+
+# Add margins
+plt.tight_layout()
+
+plt.show()
+```
+
+Here is a nice way to visualize the locations and frequencies of street flood and catch basin complaint types. 
+While catch basin complaints seem fairly ubiquitous, street floods seem to occur in the same general areas.
+
+### Create a variable response_time, which is the duration from created_date to closed_date.
+
+Because we've converted both created_date and closed_date to the pandas' datetime format, caculate response_time is as easy as finding the difference between these two variables:
+```{python}
+# Creating response time variable
+df['response_time'] = df['closed_date'] - df['created_date']
+
+# Since response time is so important we'll drop any rows without it
+df = df.dropna(subset=['response_time'])
+
+df[['created_date', 'closed_date', 'response_time']].head()
+```
+
+As you can see, the response_time column correctly finds the time between our created_date and closed_date variables.
+
+### Visualize the comparison of response time by complaint descriptor and borough. The original may not be the best given the long tail or outlers.
+
+A matrix of histograms would provide a great way to visualize how our continous variable response_time is distrbed across different catagories defined by two catagorical variables.
+We can use seaborn's FacetGrid to create histograms for combinations of catagroical variables:
+
+```{python}
+import seaborn as sns
+import matplotlib.pyplot as plt
+import numpy as np
+
+df_hs = df.copy()
+
+# Convert response time to numeric variable
+df_hs['rt_n'] = df_hs['response_time'].dt.total_seconds()
+
+# Calculate limits
+upper_limit = np.percentile(df_hs['rt_n'], 98)
+
+# Create a FacetGrid
+g = sns.FacetGrid(df_hs, col='descriptor', row='borough', margin_titles=True)
+
+# Map the histogram to the grid
+g.map(plt.hist, 'rt_n', bins=40)
+
+# Set the x-axis limit to exclude extreme outliers
+g.set(xlim=(0, upper_limit))
+
+# labels
+g.set_axis_labels('Response Time', 'Frequency')
+g.set_titles(col_template="{col_name}", row_template="{row_name}")
+
+plt.tight_layout()
+plt.show()
+```
+
+As expected, with the large range in values finding good choices for bounds is tricky. 
+Nonetheless, I think this plot does a good job comparing the distribution of the different groups.
+
+### Is there significant difference in response time between SF and CB complaints? Across different boroughs? Does the difference between SF and CB depend on borough? State your hypothesis, justify your test, and summarize your results in plain English
+
+Let's begin by investigating whether there is any significant difference in response time between Street Flooding (SF) and Catch Basin (CB) complaints.
+Given , since each complaint is handled separately, response times for SF and CB compmlaints are independent.
+it makes most sense to use an independent t-test.
+
+- Null hypothesis (H_0): The means of the two populations (SF and CB complaints) are the same.
+- Alternatie hypothesis (H_a): The means of the two populations are not the same.
+
+Now let's perform an independent t-test in python:
+```{python}
+import scipy.stats as stats
+
+# Filter data to get the SF and CB rows
+df_sf = df[df['descriptor']=='Street Flooding (SJ)']['response_time']
+df_cb = df[df['descriptor']=='Catch Basin Clogged/Flooding (Use Comments) (SC)']['response_time']
+
+t_stat, p_value = stats.ttest_ind(df_sf, df_cb, equal_var=True)
+print("Independent t-test:")
+print(f"t-statistic: {t_stat:.4f}")
+print(f"p-value: {p_value:.4f}")
+print(f"Significant (α=0.05): {p_value < 0.05}")
+```
+
+Recall that a common threshold for significance is if the p-value is less than 0.05.
+In other words, if we assumed that there was no difference in response time for sf and cb complaints the probability of seeing data as or more extreme than our own just by chance is approximately zero.
+Therefore we can conclude that there is a significant difference between the groups.
+
+Next, let's investigate whether there is any significant difference in response time across boroughs.
+Given that we now have more than two independent groups, and we'd like to check for a significant difference in a continous variable across all categories, the appropriate statistical test is the one-way ANOVA (Analysis of Variance) test.
+
+- Null hypothesis (H_0): All of the group means are equal
+- Alternatie hypothesis (H_a): At least one group mean is different from the rest
+Now let's perform an one-way ANOVA test in python:
+```{python}
+from scipy import stats
+
+groups = df['borough'].unique()
+
+group_data = []
+
+for i in groups:
+  response_times = pd.to_numeric(df[df['borough']==i]['response_time'].dt.total_seconds())
+  group_data.append(response_times)
+
+f_stat, p_value = stats.f_oneway(*group_data)
+print("\nOne-way ANOVA:")
+print(f"F-statistic: {f_stat:.4f}")
+print(f"p-value: {p_value:.4f}")
+print(f"Significant (α=0.05): {p_value < 0.05}")
+```
+
+Similar to before, we've found that the probability of randomly getting data with such extreme differences in response time between boroughs is approximately zero.
+Accordingly, we can reject the null hypothesis in favor for the alternate hypothesis: at least one group mean is different from the rest.
+
+Finally, let's investigate whether the difference between SF and CB depend on borough. 
+Given that we now have more than two independent groups that have been split on two factors, and we'd like to compare the means of a continous variable across all categories, the appropriate statistical test is the two-way ANOVA test.
+
+Notably, the two-way ANOVA tests is often represented with multiple parts to its hypotheses:
+Null hypothesis (H_0):
+- All group means are equal at each level of the first variable
+- All group means are equal at each level of the second variable
+- There is no interaction effect between the two variables
+
+Alternatie hypothesis (H_a):
+- There is a difference between the means of groups of the first factor
+- There is a difference between the means of groups of the second factor
+- One factor has an effect on the other
+
+```{python}
+from statsmodels.formula.api import ols
+from statsmodels.stats.anova import anova_lm
+
+df_an = df
+
+# Changing response time to a numeric value
+df_an['rt_n'] = df_an['response_time'].dt.total_seconds()
+
+# Perform two-way ANOVA
+formula = 'rt_n ~ C(descriptor) * C(borough)'
+model = ols(formula, data=df).fit()
+anova_table = anova_lm(model)
+
+
+print("\nTwo-way ANOVA:")
+print(anova_table)
+```
+
+From the output we can extract that descriptor, burough, and their interaction term are all significant.
+Previosly we demonstrated the how different descriptors and different boroughs tend to have different response time.
+Now we have checked while considering both descriptor and borough at once. 
+If also considering descriptor at the same time made borough not nearly as important we could question whether response time truly DEPENDS on borough.
+However, both borough and descriptor were still very statistically significant, providing good evidence that response time does in fact rely on borough.
+
+### Create a binary variable over3d to indicate that a service request took three days or longer to close.
+
+Using the response_time variable we created earlier, we can create the a new binary over3d variable using numpy's np.where() function:
+```{python}
+import numpy as np
+
+# Creating binary over3d variable
+df['over3d'] = np.where(df['response_time'].dt.days > 2, 1, 0)
+
+df[['response_time', 'over3d']].head()
+```
+
+As you can see, the over3d column correctly indetifies whether response_time is at least 3 days.
+
+### Does over3d depend on the complaint descriptor, borough, or weekday (vs weekend/holiday)? State your hypotheses, justify your test, and summarize your results.
+
+Since we have a binary outcome variable, over3d, and we're interested in seeing if any of descriptor, borough, or weekday relate to it, to test this we can do a logistic regression.
+
+- Null hypothesis (H_0): over3d is independent of all predictors
+- Alternatie hypothesis (H_0): At least one predictor has a significant effect on over3d
+
+We can do a logistic regression in python as follows:
+```{python}
+import pandas as pd
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import classification_report
+
+df_lr = df
+
+df_lr['created_date'] = pd.to_datetime(df['created_date'])
+df_lr['weekday'] = df['created_date'].dt.weekday < 5
+
+X = df_lr[['weekday', 'borough', 'descriptor']]
+y = df_lr['over3d']
+
+# preprocessing pipeline
+preprocessor = ColumnTransformer(
+    transformers=[
+        ('cat', OneHotEncoder(drop='first', sparse_output=False), ['weekday', 'borough', 'descriptor'])
+    ])
+
+model = Pipeline([
+    ('preprocessor', preprocessor),
+    ('classifier', LogisticRegression(max_iter=1000))
+])
+
+# Fit model
+model.fit(X, y)
+
+# Predictions
+y_pred = model.predict(X)
+
+# Quick evaluation
+print(classification_report(y, y_pred))
+
+```
+
+If there truly was not relationship between these catagorical variables and over3d, we would expect to see no advantage of the model over random guessing.
+However, we can see that this what not the case.
+Therefore we have reason to reject the null hypothesis in favor for the alternative hypothesis that at least one of the predictors has a significant relationship with over3d
+
+
+```{python}
+df.columns
+```
+
+# Modeling the occurrence of overly long response time.
+
+### Create a data set which contains the outcome variable over3d and variables that might be useful in predicting it. Consider including time-of-day effects (e.g., rush hour vs. late-night), seasonal trends, and neighborhood-level demographics. Zip code level information could be useful too, such as the zip code area and the ACS 2023 variables (data/nyc_zip_areas.feather and data/acs2023.feather).
+
+There are a few ways to merge these datasets, so I think it'd best to consider why we want to merge the data, and let the motivation inform our decision.
+Let's start by bringing in the acs data.
+It has plenty of zip code level socio-economic variables that may serve beneficial.
+
+```{python}
+df_acs = pd.read_feather('acs2023.feather')
+
+# Renaming columns
+df_acs.columns = df_acs.columns.str.lower().str.replace(' ', '_')
+
+print(df_acs.columns)
+```
+
+It appears that the best path forward is merging this with our original dataset over their shared zip code data.
+Before that, we need to make sure that the columns are in the same format:
+
+```{python}
+df['incident_zip'] = df['incident_zip'].astype('Int64')
+df_acs['zip_code'] = df_acs['zip_code'].astype('Int64')
+```
+
+Now we can go ahead and merge the columns:
+
+```{python}
+# Merging df and df_acs on zip code data
+df_log = df.merge(df_acs, how='left', left_on='incident_zip', right_on='zip_code')
+
+# Removing second zip code column
+df_log = df_log.drop('zip_code', axis=1)
+
+df_log.columns
+```
+
+Next, let's add the zip code area data from nyc_zip_areas into our logsitic regression data set:
+```{python}
+df_area = pd.read_feather('nyc_zip_areas.feather')
+
+# Renaming columns
+df_area.columns = df_area.columns.str.lower().str.replace(' ', '_')
+
+print(df_area.columns)
+```
+
+Unfortunately for us, the area dataset doesn't already share a variable with our existing dataset.
+To work around this were going to use the Modified Zip Code Tabulation Areas (MODZCTA) variable to create a zip code column which we will then merge on.
+However, using MODZCTA isn't a perfect solution since many MODZCTAs combine multiple zip codes.
+Therefore, it doesn't appear to be possible to incorporate df_area into our analysis without making some sacrifice in accuracy.
+
+Now we will create a plethora of new variables for our logistic regression:
+```{python}
+df_log_trim = df_log
+
+df_log_trim['cross_street_count'] = df_log[['cross_street_1', 'cross_street_2']].notna().sum(axis=1)
+df_log_trim['int_street_count'] = df_log[['intersection_street_1', 'intersection_street_2']].notna().sum(axis=1)
+
+# Converting race count statistics to proportions
+df_log_trim['white_prop'] = df_log['white_population'] / df_log['total_population']
+df_log_trim['black_prop'] = df_log['black_population'] / df_log['total_population']
+df_log_trim['asian_prop'] = df_log['asian_population'] / df_log['total_population']
+
+# Converting socioeconomic counts to proportions
+df_log_trim['bach_prop'] = df_log['bachelor’s_degree_holders'] / df_log['total_population']
+df_log_trim['grad_prop'] = df_log['graduate_degree_holders'] / df_log['total_population']
+df_log_trim['unemployed_prop'] = df_log['unemployed'] / df_log['total_population']
+
+# Creating variables around timing
+# Extract and encode cyclical features
+df_log_trim['sin_day'] = np.sin(2 * np.pi * df_log['created_date'].dt.hour / 24)
+df_log_trim['cos_day'] = np.cos(2 * np.pi * df_log['created_date'].dt.hour / 24)
+
+df_log_trim['sin_year'] = np.sin(2 * np.pi * df_log['created_date'].dt.month / 12)
+df_log_trim['cos_year'] = np.cos(2 * np.pi * df_log['created_date'].dt.month / 12)
+
+df_log_trim['hour'] = df_log['created_date'].dt.hour
+
+# List of major holidays in 2023
+holidays_2023 = [
+    '2023-01-01', '2023-01-16', '2023-02-20', '2023-05-29', '2023-06-19', '2023-07-04', '2023-09-04', '2023-10-09', '2023-11-10', '2023-11-23', '2023-12-25'
+]
+# Convert to datetime for comparison
+holidays_2023 = pd.to_datetime(holidays_2023)
+# Create the holiday binary variable
+df_log_trim['weekend_or_holiday'] = df_log['created_date'].dt.date.isin(holidays_2023.date) | df_log['created_date'].dt.weekday >= 5
+
+
+# Removing columns that won't correlate with over3d
+df_log_trim = df_log_trim.drop(['unique_key', 'resolution_description', 'resolution_action_updated_date', 'community_board', 'park_borough', 'location', 'created_date', 'closed_date', 'response_time', 'white_population', 'black_population', 'asian_population', 'bachelor’s_degree_holders', 'graduate_degree_holders', 'status'], axis=1)
+```
+
+
+### Randomly select 20% of the complaints as testing data with seeds 1234. Build a logistic model to predict over3d for the complaints with the training data. If you have tuning parameters, justify how they were selected.
+
+First off, let's import all required packages for the remainder of this section since there's quite a few
+
+```{python}
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.preprocessing import StandardScaler, OneHotEncoder, OrdinalEncoder
+from sklearn.impute import SimpleImputer, KNNImputer
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.feature_selection import SelectFromModel
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score, roc_curve
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+```
+
+Note that I've designed these code chunks so that it's very easy to mix and match predictor variables.
+Before splitting the data, we'll organize columns by whether they're numeric or catagorical.
+This will come in handy when it come to transforming data as per standard logistic regression.
+```{python}
+# Easily change out predictors
+my_dataframe = df_log_trim 
+target_col = 'over3d'
+ordinal_cols = [] 
+
+# Convert the following to binary indicators
+binary_conversion_cols = ['incident_address', 'street_name', 'city']
+
+# avoid modifying original df
+data = my_dataframe.copy()
+
+# Making binary column indicators
+for col in binary_conversion_cols:
+    if col in data.columns:
+        binary_col_name = f"is_valid_{col}"
+        data[binary_col_name] = data[col].notnull().astype(int)
+        print(f"Created binary indicator {binary_col_name}")
+
+# identify column types
+categorical_cols = data.select_dtypes(include=['object', 'category']).columns.tolist()
+numerical_cols = data.select_dtypes(include=['int64', 'float64']).columns.tolist()
+
+# Remove target
+if target_col in categorical_cols:
+    categorical_cols.remove(target_col)
+if target_col in numerical_cols:
+    numerical_cols.remove(target_col)
+
+# Append the created binary columns to numerical list
+for col in binary_conversion_cols:
+    binary_col_name = f"is_valid_{col}"
+    if binary_col_name in data.columns and binary_col_name not in numerical_cols:
+        numerical_cols.append(binary_col_name)
+
+# Split data
+X = data.drop(columns=[target_col])
+y = data[target_col]
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=1234, stratify=y)
+
+# Create transformers list
+transformers = []
+
+# numerical transformers
+if numerical_cols:
+    numerical_transformer = Pipeline(steps=[
+        ('imputer', KNNImputer(n_neighbors=5)),
+        ('scaler', StandardScaler())
+    ])
+    transformers.append(('num', numerical_transformer, numerical_cols))
+
+# categorical transformers
+if categorical_cols:
+    categorical_transformer = Pipeline(steps=[
+        ('imputer', SimpleImputer(strategy='most_frequent')),
+        ('onehot', OneHotEncoder(handle_unknown='ignore'))
+    ])
+    transformers.append(('cat', categorical_transformer, categorical_cols))
+
+# making preprocessor
+preprocessor = ColumnTransformer(transformers=transformers)
+```
+
+At this point we can move onto doing our feature selection with the least absolute shrinkage and selection operator method or (LASSO). 
+
+```{python}
+# LASSO feature pipeline
+lasso_pipeline = Pipeline([
+    ('preprocessor', preprocessor),
+    ('feature_selection', SelectFromModel(
+        LogisticRegression(penalty='l1', C=1.0, solver='liblinear', random_state=1234)
+    ))
+])
+
+# Fit LASSO for feature selection
+lasso_pipeline.fit(X_train, y_train)
+```
+
+
+Now we will move onto tuning the model.
+Note that we will be slecting tuning a parameter using k-fold cross validation where k=5.
+```{python}
+# Create model pipeline with the LASSO feature selector
+model = Pipeline([
+    ('preprocessor', lasso_pipeline),
+    ('classifier', LogisticRegression(random_state=1234))
+])
+
+# Define simplified parameter grid
+param_grid = {
+    'classifier__C': [0.01, 0.1, 1, 10],
+    'classifier__class_weight': [None, 'balanced']
+}
+
+# grid search w/ cross-validation
+grid_search = GridSearchCV(
+    model,
+    param_grid,
+    cv=5,
+    scoring='roc_auc',
+    n_jobs=-1,
+    return_train_score=True
+)
+
+grid_search.fit(X_train, y_train)
+best_model = grid_search.best_estimator_
+```
+
+### Construct the confusion matrix from your prediction with a threshold of 1/2 on both training and testing data. Explain your accuracy, recall, precision, and F1 score to a New Yorker.
+
+All of this is accomplished by the following python code:
+
+```{python}
+# Get probabilities and make predictions with threshold 0.5
+# For test data
+y_test_prob = best_model.predict_proba(X_test)[:, 1]
+y_test_pred = (y_test_prob >= 0.5).astype(int)
+
+# For training data
+y_train_prob = best_model.predict_proba(X_train)[:, 1]
+y_train_pred = (y_train_prob >= 0.5).astype(int)
+
+# Calculate metrics for test data
+test_accuracy = accuracy_score(y_test, y_test_pred)
+test_precision = precision_score(y_test, y_test_pred)
+test_recall = recall_score(y_test, y_test_pred)
+test_f1 = f1_score(y_test, y_test_pred)
+
+# Calculate metrics for training data
+train_accuracy = accuracy_score(y_train, y_train_pred)
+train_precision = precision_score(y_train, y_train_pred)
+train_recall = recall_score(y_train, y_train_pred)
+train_f1 = f1_score(y_train, y_train_pred)
+
+# Print the metrics
+print("\nTraining Data Metrics (threshold=0.5):")
+print(f"Accuracy: {train_accuracy:.3f}")
+print(f"Precision: {train_precision:.3f}")
+print(f"Recall: {train_recall:.3f}")
+print(f"F1 Score: {train_f1:.3f}")
+
+print("\nTesting Data Metrics (threshold=0.5):")
+print(f"Accuracy: {test_accuracy:.3f}")
+print(f"Precision: {test_precision:.3f}")
+print(f"Recall: {test_recall:.3f}")
+print(f"F1 Score: {test_f1:.3f}")
+
+# Create confusion matrices
+# Test data confusion matrix
+plt.figure(figsize=(12, 5))
+
+plt.subplot(1, 2, 1)
+test_cm = confusion_matrix(y_test, y_test_pred)
+sns.heatmap(test_cm, annot=True, fmt='d', cmap='Blues', cbar=False)
+plt.xlabel('Predicted')
+plt.ylabel('Actual')
+plt.title('Test Data Confusion Matrix')
+```
+
+You can think of accuracy as your overall correctness.
+Accuracy can be calculated by dividing the number of correct predictions by the total number of predictions.
+So for the Training data, we predicted Over3d correct about 70% of the time.
+
+You can think of Precision as the trustwrothiness of the model.
+In other words, when the model says it'll take at least 3 days how often is it correct.
+For the training data, the model got a precision score of about 40%
+
+You can think of recall as the sensitivity of the model.
+In this instance, recall tells us out of all the over 3 day instances, how many did the model catch.
+For the training data the model found about 77% of all over 3 day events.
+
+Finally, F1 score is a balance between precision and recall.
+on there own it's possible to exploit precision and recall, but working together, it's a robust measurement for the overall model performance.
+For the training data the model got a F1 score of 53%
+
+### Construct the ROC curve of your fitted logistic model and obtain the AUROC for both training and testing data. Explain your results to a New Yorker.
+
+
+First let's start with the testing data ROC curve and AUC:
+```{python}
+# Make predictions
+y_pred = best_model.predict(X_test)
+y_prob = best_model.predict_proba(X_test)[:, 1]
+
+# Print model evaluation metrics
+print("\nModel Performance:")
+print(f"Best parameters: {grid_search.best_params_}")
+print(f"ROC AUC: {roc_auc_score(y_test, y_prob):.3f}")
+print("\nClassification Report:")
+print(classification_report(y_test, y_pred))
+
+# Plot ROC curve
+fpr, tpr, _ = roc_curve(y_test, y_prob)
+auc = roc_auc_score(y_test, y_prob)
+plt.figure(figsize=(8, 6))
+plt.plot(fpr, tpr, label=f'ROC Curve (AUC = {auc:.3f})')
+plt.plot([0, 1], [0, 1], 'k--')
+plt.xlabel('False Positive Rate')
+plt.ylabel('True Positive Rate')
+plt.title('ROC Curve')
+plt.legend()
+plt.show()
+```
+
+In this instance we see AUC of about 0.74. An AUC score at 0.5 indicates 0 discrimination, and a AUC from 0.7-.8 is typically considered acceptable.
+Now let's do the same but for the training data. We expect the AUC to be a little bit higher this time:
+
+```{python}
+# Make predictions
+y_pred = best_model.predict(X_train)
+y_prob = best_model.predict_proba(X_train)[:, 1]
+
+# Print model evaluation metrics
+print("\nModel Performance:")
+print(f"Best parameters: {grid_search.best_params_}")
+print(f"ROC AUC: {roc_auc_score(y_train, y_prob):.3f}")
+print("\nClassification Report:")
+print(classification_report(y_train, y_pred))
+
+# Plot ROC curve
+fpr, tpr, _ = roc_curve(y_train, y_prob)
+auc = roc_auc_score(y_train, y_prob)
+plt.figure(figsize=(8, 6))
+plt.plot(fpr, tpr, label=f'ROC Curve (AUC = {auc:.3f})')
+plt.plot([0, 1], [0, 1], 'k--')
+plt.xlabel('False Positive Rate')
+plt.ylabel('True Positive Rate')
+plt.title('ROC Curve')
+plt.legend()
+plt.show()
+```
+
+In this instance we see AUC of about 0.80. An AUC score around 0.80 is usually considered quite good.
+As expected the AUC is slightly higher.
+
+### Identify the most important predictors of over3d. Use model coefficients or feature importance (e.g., odds ratios, standardized coefficients, or SHAP values).
+
+The following code chunk will reveal plenty about the most important predictors in the model:
+
+```{python}
+# Get coefficients from the logistic regression model
+classifier = best_model.named_steps['classifier']
+coef = classifier.coef_[0]
+
+# Try to get feature names
+try:
+    preprocessor_step = best_model.named_steps['preprocessor']
+    if hasattr(preprocessor_step, 'named_steps') and 'feature_selection' in preprocessor_step.named_steps:
+        # Get selected features from LASSO
+        feature_selector = preprocessor_step.named_steps['feature_selection']
+        mask = feature_selector.get_support()
+        
+        # Get all feature names from preprocessor
+        feature_preprocessor = preprocessor_step.named_steps['preprocessor'] 
+        all_features = feature_preprocessor.get_feature_names_out()
+        
+        # Filter to selected features
+        feature_names = all_features[mask]
+    else:
+        feature_names = preprocessor_step.get_feature_names_out()
+except:
+    feature_names = [f'Feature_{i}' for i in range(len(coef))]
+
+# Create feature importance DataFrame
+feature_importance = pd.DataFrame({
+    'Feature': feature_names,
+    'Coefficient': coef,
+    'Absolute': np.abs(coef)
+}).sort_values('Absolute', ascending=False)
+
+# Display top features
+print("\nTop 10 Most Important Features:")
+print(feature_importance.head(10))
+
+# feature importance
+plt.figure(figsize=(10, 8))
+top_n = min(15, len(feature_importance))
+sns.barplot(
+    x='Coefficient', 
+    y='Feature', 
+    data=feature_importance.head(top_n),
+    palette=['red' if x < 0 else 'green' for x in feature_importance.head(top_n)['Coefficient']]
+)
+plt.title('Feature Importance')
+plt.axvline(x=0, color='k', linestyle='--')
+plt.tight_layout()
+plt.show()
+```
+
+I'll keep my interpretation brief since the output displays almost all intruiging information.
+By no surprise the most impactful predictor in the model was the descriptor being street flood. 
+What did surprise me was the number of location based catagorical variables that found themsevles into the top spots.
+For example, Brooklyn makes multiple appearances near the top of the most important features list.
+
+### Summarize your results to a New Yorker who is not data science savvy in several bullet points.
+
+Say your interested in knowing whether a street flood or catch basin complaint will take more than 3 days to be resolved, by finding our the following information you'll be able to make an educated guess on the likelihood of it happing.
+The most important thing to consider is what kind of complaint is it.
+The liklihood of you having to wait over 3 days is higher if it's a catch basin issue rather than a street flooding issue.
+Another important detail is where the issue is taking place.
+If it's in Brooklyn it's more likely to be resolved quickly than if it's taking place in Glen Oaks or Bellerose.
+
+
+# Modeling the count of SF complains by zip code.
+
+### Create a data set by aggregate the count of SF and CB complains by day for each zipcode.
+
+Currently we only have the created_date column, which contains both date and time. 
+Since, in this instance we'd like to group data by date, the additional information in created_date will complicate things.
+Hence, let's begin by creating a new column called "created_day" containing the only the calendar date of the entry:
+```{python}
+df['created_day'] = df['created_date'].dt.date
+
+df[['created_date', 'created_day']].head()
+```
+
+Now we can aggregate the count of SF and CB complaints by day and zip code using pandas' pivot_table() function to reshape the data by aggregating counts of each compleint type per (created_day, zip_code) combination:
+```{python}
+
+df_agg = df.pivot_table(index=['created_day', 'incident_zip'], 
+                        columns='descriptor', # Make each unique value in 'complaint_type' a column
+                        aggfunc='size', 
+                        fill_value=0).reset_index()
+
+
+df_agg.columns.name = None  # Remove MultiIndex name
+df_agg.rename(columns={'type_a': 'count_type_a', 'type_b': 'count_type_b'}, inplace=True)
+
+
+df_agg.head()
+```
+
+While it may not be obvious now, this section has nicely reformatted our data for performing count data regression analysis.
+
+### Merge the NYC precipitation (data/rainfall_CP.csv), by day to this data set.
+
+Before anything else let's read in the NYC precipitation data set and rename the columns with our preferred styles.
+
+```{python}
+# Reading in precipitation data
+df_rain = pd.read_csv('rainfall_CP.csv')
+
+# Renaming columns
+df_rain.columns = df_rain.columns.str.lower().str.replace(' ', '_')
+
+print(df_rain.columns)
+```
+
+We'll now procede to merge the two datasets on their shared time variables.
+df_rain has two columns for each date and time, one containing the calendar date while the other contains the time of day.
+Recall that in df_agg has a single column for calendar date, 'created_day' in the datetime format.
+Hence we should move forward by mering the two datasets on their shared calendar date varaibles (created_day and 'date(m/d/y)').
+Before continuing, let's convert 'date(m/d/y)' to the datetime format so that it aligns with created_day.
+
+```{python}
+# Creating datetime variable 'date_dt' in df_rain
+df_rain['date_dt'] = pd.to_datetime(df_rain['date(m/d/y)'], format='%m/%d/%Y')
+
+# Confirming created_day is in the datetime format
+df_agg['created_day'] = pd.to_datetime(df_agg['created_day'], format='%Y-%m-%d')
+
+# Check if new variable is functioning as intended
+df_rain[['date(m/d/y)', 'date_dt']].head()
+```
+
+However, note that each particular day will have multiple precipitation values:
+
+```{python}
+df_rain[df_rain['date_dt'] == "2023-03-01"].head()
+```
+
+We would only like a single precipitation value for each day in df_agg. Hence, a good way to simplify things is by taking the average of the values. We can accomplish this using pandas' groupby() function to group df_rain by day before performing our merge.
+
+```{python}
+# Finding avg value per day in df_rain
+avg_rain = df_rain.groupby('date_dt')['value'].mean().reset_index()
+
+df_merge = df_agg.merge(avg_rain, left_on='created_day', right_on='date_dt', how='left')
+
+# Dropping the redundent column (date_dt)
+df_merge2 = df_merge.drop('date_dt', axis=1)
+
+df_merge2.head()
+```
+
+After all that, we have successfully merged the two datasets.
+
+### Merge the NYC zip code level landscape variables (data/nyc_zip_lands.csv) and ACS 2023 variables into the data set.
+
+Similar to the previous section, let's first read in our landscape data set and rename the columns with our preferred styles. 
+
+```{python}
+# Reading in zipcode level landscape data
+df_lands = pd.read_csv('nyc_zip_lands.csv')
+
+# Renaming columns
+df_lands.columns = df_lands.columns.str.lower().str.replace(' ', '_')
+
+df_lands.columns
+```
+
+We'll now procede to merge df_merge2 and df_lands on their shared zipcode variables (incident_zip and zipcode).
+Like before, let's confirm that the two columns share the same datatype:
+```{python}
+print(df_merge2['incident_zip'].dtype)
+print(df_lands['zipcode'].dtype)
+```
+
+Since int64 generally takes less space than float64, and all zip codes are integers, we'll move forward by converting incident_zip to int64:
+```{python}
+# Changing zip from float to int
+df_merge2['incident_zip'] = df_merge2['incident_zip'].astype('int64')
+```
+
+We can now procede to merging the two data sets:
+```{python}
+# Perfoming left merge of df_merge2 and df_lands
+df_merge3 = df_merge2.merge(df_lands, how='left', left_on='incident_zip', right_on='zipcode')
+
+# Dropping the redundent column (incident_zip)
+df_merge3 = df_merge3.drop('incident_zip', axis=1)
+
+df_merge3.head()
+```
+
+We'll merge the 2023 ACS data set with df_merge3 in a very similar manner.
+Note that we don't need to worry about reading in and cleaning the ACS data since we have already done so in part c. Let's take a look at the columns in df_acs
+
+```{python}
+df_acs.columns
+df_merge3.columns
+```
+
+Once again our new column has zip code data, so we'll be using that to merge the data sets. 
+Like before, let's confirm that the two columns share the same datatype:
+```{python}
+print(df_merge3['zipcode'].dtype)
+print(df_acs['zip_code'].dtype)
+```
+
+Like before, since int64 generally takes less space than float64, and all zip codes are integers, we'll move forward by converting incident_zip to int64:
+```{python}
+# Changing zip from float to int
+df_merge3['zipcode'] = df_merge3['zipcode'].astype('Int64')
+```
+
+We can now procede to merging the two data sets:
+```{python}
+# Perfoming left merge of df_merge2 and df_lands
+df_merge4 = df_merge3.merge(df_acs, how='left', left_on='zipcode', right_on='zip_code')
+
+# Dropping the redundent column (incident_zip)
+df_merge4 = df_merge4.drop('zip_code', axis=1)
+
+df_merge4.head()
+```
+
+Now we have all four data set neatly organized into a singular data set.
+
+### For each day, create two variables representing 1-day lag of the precipitation and the number of CB complaints.
+
+This is going to be a bit complicated given there are many rows for each day. However, we can still work through it leveraging the groupby() function:
+
+```{python}
+# Sort data chronologically
+df_merge4 = df_merge4.sort_values('created_day')
+
+# Get the mean value for each unique created_day
+last_values_per_day = df_merge4.groupby('created_day')['value'].mean().reset_index()
+
+# Shift the value to create lag
+last_values_per_day['lag_value'] = last_values_per_day['value'].shift(1)
+
+# Map lag values back to the original
+df_merge4 = df_merge4.merge(last_values_per_day[['created_day', 'lag_value']], on='created_day', how='left')
+
+df_merge4[['created_day','value','lag_value']].head()
+```
+
+Since that has worked for value, let's do the same thing for CB count. Before getting started though, we need to create a column in df_merge4 for the total number of CB complaints per day:
+```{python}
+# Find total CB complaints per day
+df_merge4['total_CB'] = df_merge4.groupby('created_day')['Catch Basin Clogged/Flooding (Use Comments) (SC)'].transform('sum')
+
+df_merge4[['created_day','Catch Basin Clogged/Flooding (Use Comments) (SC)', 'total_CB']].head()
+```
+
+Now let's created a lag_cb column in the same way we made a lag_value column:
+```{python}
+# Get the last available total cb for each unique created_day
+last_cbtotal_per_day = df_merge4.groupby('created_day')['total_CB'].last().reset_index()
+
+# Shift the value to create lag
+last_cbtotal_per_day['lag_CB'] = last_cbtotal_per_day['total_CB'].shift(1)
+
+# Map lag values back to the original
+df_merge4 = df_merge4.merge(last_cbtotal_per_day[['created_day', 'lag_CB']], on='created_day', how='left')
+
+df_merge4[['created_day','total_CB','lag_CB']].head()
+```
+
+The output looks good!
+
+### Filter data from March 1 to November 30, excluding winter months when flooding is less frequent. November 30.
+
+Next we need to filter the data so that we exclude winter months.
+The mechanisms driving floods in winter (e.g., snowmelt, icejams, frozen ground) may be very different from those during warmer months (e.g., heavy rain, storms).
+Our goal is to investigate one type of flooding (floods due to rainfall) so including winter months may interfere with the model we plan on creating.
+We can limit our data to the desired interval using the following python code:
+```{python}
+# specifying bounds
+start_date = pd.Timestamp("2024-03-01")
+end_date = pd.Timestamp("2024-11-30")
+
+# filtering to entries within desired interval
+df_merge4['created_day'] = pd.to_datetime(df_merge4['created_day'])
+
+print(df_merge4['created_day'].head())
+print(start_date)
+
+df_M2N = df_merge4[df_merge4['created_day'].between(start_date, end_date)]
+
+# C
+# ompare ammount of data before and after filter
+print(len(df_merge4))
+print(len(df_M2N))
+```
+
+As you can see we have significantly less data after removing the winter months.
+Now we can procede to fitting our count regression models.
+
+### Compare a Poisson regression with a Negative Binomial regression to account for overdispersion. Which model fits better? Explain the results to a New Yorker.
+
+Our goal here is to model the number of SF complaints per day per zip code.
+In terms of predictors we have quite a few variables to choose from.
+Let's remind ourselves of the options:
+```{python}
+df_M2N.columns
+```
+
+For the sake of keeping things approachable for non-statisticians let's limit it to the 3 factors we think'll be most important.
+In my opinion those are:
+
+- lag_value
+- lag_CB
+- elevation
+
+Let's be sure to make sure all column names fit our style:
+```{python}
+# Renaming columns
+df_M2N.columns = df_M2N.columns.str.lower().str.replace(' ', '_')
+
+# Reformatting SF column to avoid syntax issues
+df_M2N = df_M2N.rename(columns={'street_flooding_(sj)':'sf'})
+
+print(df_M2N.columns)
+```
+
+One final thing is decide how to handle missing data.
+Since we are only working with 4 columns, all of which are nearly full, let's handle missing data by completing eliminating rows:
+```{python}
+df_M2N = df_M2N.dropna(subset=['sf','lag_value','lag_cb','elevation'])
+```
+
+```{python}
+len(df_M2N)
+```
+
+Now it's time to fit the poisson regression:
+
+```{python}
+import statsmodels.api as sm
+import statsmodels.formula.api as smf
+
+# Fit Poisson regression
+poisson_model = smf.glm("sf ~ lag_value + lag_cb + elevation", data=df_M2N, family=sm.families.Poisson()).fit()
+
+poisson_model.summary()
+```
+
+Now it's time to fit the negative binomial regression:
+
+```{python}
+# Fit Negative Binomial regression
+nb_model = smf.glm("sf ~ lag_value + lag_cb + elevation", 
+data=df_M2N,family=sm.families.NegativeBinomial()).fit()
+
+nb_model.summary()
+```
+
+There's alot of information already.
+Recall that for count regressions: Effect on count = e^beta, where e is euler's constant and beta is the coefficient associated with a predictor.
+For example, lag_cb had a coefficient of 0.0071.
+This means that a 1 unit increase in the number of CB complaints the previous day is associated with a .71% increase in SF complaints for a given zip code.
+Breaking things down all the way for someone without any knowledge of statistics, The number of SF complaints in a given zip code on a given day had a slight positive relationship with being at a lower elevation and havign more total CB complaints across NYC the previous day. 
+Curiously, The amount of rain across NYC the previous day did not have a signifiant effect on the number of SF complaints for a particular zip code.
+
+```{python}
+# Overdispersion check: Compute Pearson Chi-square statistic
+poisson_deviance = poisson_model.pearson_chi2 / poisson_model.df_resid
+nb_deviance = nb_model.pearson_chi2 / nb_model.df_resid
+
+# Akaike Information Criterion (AIC) comparison
+poisson_aic = poisson_model.aic
+nb_aic = nb_model.aic
+
+# Residual analysis
+df_M2N["Poisson_Residuals"] = poisson_model.resid_pearson
+df_M2N["NB_Residuals"] = nb_model.resid_pearson
+
+# Summary of results
+summary_results = {
+    "Poisson Coefficients": poisson_model.params.to_dict(),
+    "Negative Binomial Coefficients": nb_model.params.to_dict(),
+    "Poisson Deviance": poisson_deviance,
+    "Negative Binomial Deviance": nb_deviance,
+    "Poisson AIC": poisson_aic,
+    "Negative Binomial AIC": nb_aic
+}
+
+# Return the summary of findings
+summary_results
+```
+
+From these results it appears that we'd be better of going with the negative binomial for a few reasons.
+First off, the Poisson model is more restricted in that it assumes the deviance or the spread of the data is 1.
+When the actual deviance is greater than 1 (like in our case) it harms the poisson model's accuracy.
+We also measure the AIC of both models.
+We would like AIC to be as small as possible.
+Notice that the negative binomial model had the smaller AIC.
+For these reasons all signs point towards selecting the negative binomial model.
